@@ -568,6 +568,38 @@
               <!-- eslint-disable-next-line svelte/no-at-html-tags -- Export renderer builds SVG using DOM APIs and escapes user text. -->
               {@html preview}
             </div>{/if}
+          <div class="print-only">
+            {#each detail.layout.racks as rack (rack.id)}
+              <h3>{rack.name} ({rack.height}U)</h3>
+              <table>
+                <thead
+                  ><tr
+                    ><th>Device / position</th><th>Serial / asset tag</th><th
+                      >Hostname / IP</th
+                    ><th>Installed / warranty</th><th>Notes</th></tr
+                  ></thead
+                ><tbody>
+                  {#each rack.devices as device (device.id)}
+                    {@const record = equipment(device)}
+                    {@const type = detail.layout.device_types.find(
+                      (item) => item.slug === device.device_type,
+                    )}
+                    <tr
+                      ><td
+                        >{device.name ??
+                          device.label ??
+                          type?.model ??
+                          device.device_type}<br />U{device.position / 6}, {device.face}</td
+                      ><td>{record.serial}<br />{record.assetTag}</td><td
+                        >{record.hostname}<br />{record.managementIp}</td
+                      ><td>{record.installed}<br />{record.warrantyExpires}</td
+                      ><td class="report-notes">{record.notes}</td></tr
+                    >
+                  {/each}
+                </tbody>
+              </table>
+            {/each}
+          </div>
           {#each detail.layout.racks as rack (rack.id)}<section
               class="rack-section"
             >
@@ -577,7 +609,7 @@
                 {@const type = detail.layout.device_types.find(
                   (item) => item.slug === device.device_type,
                 )}
-                <details class="equipment" open>
+                <details class="equipment">
                   <summary
                     ><strong
                       >{device.name ??
@@ -1006,7 +1038,36 @@
       flex-direction: column;
     }
   }
+  .print-only {
+    display: none;
+  }
   @media print {
+    .print-only {
+      display: block;
+    }
+    .print-only table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 9pt;
+      margin-bottom: 20px;
+    }
+    .print-only th,
+    .print-only td {
+      border: 1px solid #bbb;
+      padding: 5px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    .print-only tr {
+      break-inside: avoid;
+    }
+    .report-notes {
+      white-space: pre-wrap;
+    }
+    .rack-section {
+      display: none;
+    }
     :global(body) {
       background: white;
       color: #111;
