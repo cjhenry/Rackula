@@ -91,6 +91,14 @@ server {
         include /etc/nginx/snippets/security-headers.conf;
     }
 
+    # Login branding must load before a session exists. Limit this exception
+    # to the shipped icons; app routes and runtime configuration stay gated.
+    location ~ ^/(?:favicon(?:-light)?\.(?:png|svg|ico)|apple-touch-icon\.png)$ {
+        try_files $uri =404;
+        add_header Cache-Control "no-cache" always;
+        include /etc/nginx/snippets/security-headers.conf;
+    }
+
     # Runtime storage mode config, written to tmpfs by the entrypoint wrapper
     # (the html root is read-only; this exact-match alias overrides the
     # browser-mode default the build ships at /usr/share/nginx/html/config.js).
