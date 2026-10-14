@@ -44,3 +44,6 @@ npm-debug.log*
 # Local worktree snapshots
 .worktree
 .worktrees
+
+# Raw image sources are processed before the application build.
+assets-source
