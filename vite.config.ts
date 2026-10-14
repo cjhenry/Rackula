@@ -195,6 +195,7 @@ export default defineConfig(() => ({
       input: {
         main: resolve(__dirname, "index.html"),
         login: resolve(__dirname, "login.html"),
+        workspace: resolve(__dirname, "workspace.html"),
       },
       output: {
         // Manual chunks to reduce main bundle size below 500kB

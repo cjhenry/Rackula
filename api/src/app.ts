@@ -1,4 +1,5 @@
 import { Hono, type Context, type Env } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
 import { logger as honoLogger } from "hono/logger";
 import { bodyLimit } from "hono/body-limit";
@@ -314,10 +315,18 @@ export async function createApp(
   const localAuth =
     securityConfig.authMode === "local" ? await import("./local-auth") : null;
 
+  let office:
+    Awaited<ReturnType<typeof import("./office").createOffice>> | undefined;
+
   // Bootstrap local credentials when auth mode is local
   if (localAuth) {
     const localCreds = await localAuth.bootstrapLocalCredentials(env);
     securityConfig.localCredentials = localCreds;
+    if (env.RACKULA_OFFICE_ENABLED === "true") {
+      office = await (
+        await import("./office")
+      ).createOffice(env, localCreds, storage);
+    }
     // Scrub plaintext password from environment after hashing
     delete env.RACKULA_LOCAL_PASSWORD;
     // Insecure cookies in production are refused at config resolution
@@ -571,6 +580,9 @@ export async function createApp(
       );
 
       if (signedClaims) {
+        if (office && !(await office.store.resolveUser(signedClaims.sub))) {
+          return c.json({ error: "Session expired or account disabled" }, 401);
+        }
         c.set("authSubject", signedClaims.sub);
         c.set("authClaims", signedClaims);
 
@@ -786,11 +798,12 @@ export async function createApp(
         // concurrent requests from bypassing the rate limit window.
         rateLimiter.recordFailure(ip);
 
-        const valid = await verifyCredentials(
-          username,
-          password,
-          localCredentials,
-        );
+        const officeUser = office
+          ? await office.store.authenticate(username, password)
+          : undefined;
+        const valid = office
+          ? !!officeUser
+          : await verifyCredentials(username, password, localCredentials);
         if (!valid) {
           // Failure already recorded above
           safeLogAuthEvent("auth.login.failure", c.req.raw, {
@@ -806,7 +819,12 @@ export async function createApp(
         rateLimiter.recordSuccess(ip);
 
         const token = createSignedAuthSessionToken(
-          { sub: username, role: "admin" },
+          {
+            sub: officeUser
+              ? `office:${officeUser.id}:${officeUser.sessionVersion}`
+              : username,
+            role: officeUser?.role ?? "admin",
+          },
           sessionSecret,
           {
             sessionMaxAgeSeconds: securityConfig.authSessionMaxAgeSeconds,
@@ -860,7 +878,21 @@ export async function createApp(
 
   // Admin authorization for write operations when auth is enabled.
   // Runs after auth gate (which sets authClaims) and write-token auth.
-  if (securityConfig.authEnabled) {
+  if (office) {
+    for (const path of [
+      "/layouts/*",
+      "/assets/*",
+      "/api/layouts/*",
+      "/api/assets/*",
+      "/office/*",
+      "/api/office/*",
+    ]) {
+      app.use(path, office.middleware);
+    }
+    app.route("/office", office.routes);
+    app.route("/api/office", office.routes);
+  }
+  if (securityConfig.authEnabled && !office) {
     const requireAdmin = createRequireAdminMiddleware();
     app.use("/layouts/*", requireAdmin);
     app.use("/assets/*", requireAdmin);
@@ -937,6 +969,8 @@ export async function createApp(
 
   // Error handler
   app.onError((err, c) => {
+    if (err instanceof HTTPException)
+      return c.json({ error: err.message }, err.status);
     logger.error({ err }, "Unhandled error");
     return c.json({ error: "Internal server error" }, 500);
   });

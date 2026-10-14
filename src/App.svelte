@@ -58,6 +58,7 @@
     clearBrowserWriteFailure,
     loadWorkspaceIndex,
     loadLayoutBody,
+    loadFromApi,
   } from "$lib/storage";
   import { serializeLayoutToYaml } from "$lib/utils/yaml";
   import { maybeExport, handleFitAll } from "$lib/utils/app-actions";
@@ -329,6 +330,17 @@
       : Promise.resolve(false);
     if (!serverMode) {
       void probeServerForBrowserHint();
+    }
+
+    const officeLayoutId = new URLSearchParams(location.search).get("layout");
+    if (
+      serverMode &&
+      officeLayoutId &&
+      /^[0-9a-f-]{36}$/i.test(officeLayoutId)
+    ) {
+      await persistenceInitPromise;
+      await loadFromApi(officeLayoutId);
+      return;
     }
 
     // Priority 1: Check for shared layout in URL (highest priority)
