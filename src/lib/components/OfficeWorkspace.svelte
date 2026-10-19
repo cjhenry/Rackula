@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { SvelteURLSearchParams } from "svelte/reactivity";
-  import { safeRemoveItem } from "$lib/utils/safe-storage";
+  import OfficeHeader from "./OfficeHeader.svelte";
   import type {
     Client,
     Site,
@@ -50,6 +50,7 @@
   let assignmentClient = $state("");
   let assignmentSite = $state("");
   let newClientName = $state("");
+  let newSiteClient = $state("");
   let newSiteName = $state("");
   let newSiteAddress = $state("");
   let newLayoutName = $state("");
@@ -73,7 +74,9 @@
   const layouts = $derived(
     (catalog?.layouts ?? []).filter(
       (row) =>
-        (!clientId || row.assignment?.clientId === clientId) &&
+        (clientId === "unassigned"
+          ? !row.assignment
+          : !!clientId && row.assignment?.clientId === clientId) &&
         (!siteId || row.assignment?.siteId === siteId) &&
         row.name.toLowerCase().includes(search.toLowerCase()),
     ),
@@ -125,9 +128,11 @@
   }
   async function openLayout(id: string) {
     detail = await api<Detail>(`/layouts/${encodeURIComponent(id)}`);
-    assignmentClient = detail.assignment?.clientId ?? clientId;
+    clientId = detail.assignment?.clientId ?? "unassigned";
+    assignmentClient = detail.assignment?.clientId ?? "";
     assignmentSite = detail.assignment?.siteId ?? "";
     const query = new SvelteURLSearchParams(location.search);
+    query.delete("client_id");
     query.set("layout", id);
     history.replaceState(null, "", `?${query}`);
   }
@@ -190,15 +195,23 @@
     editUser();
     await reload();
   }
-  async function logout() {
-    const response = await fetch("/api/auth/logout", {
-      method: "POST",
-      credentials: "same-origin",
-    });
-    if (!response.ok) throw new Error("Unable to sign out");
-    for (const key of Object.keys(localStorage))
-      if (/^rackula/i.test(key)) safeRemoveItem(key);
-    location.href = "/auth/login";
+  function selectClient(id: string) {
+    clientId = id;
+    siteId = "";
+    detail = null;
+    search = "";
+    tab = "racks";
+    const query = new SvelteURLSearchParams(location.search);
+    query.delete("layout");
+    query.delete("client_id");
+    query.delete("tab");
+    const client = clients.find((item) => item.id === id);
+    if (client?.mcpClientId) query.set("client_id", String(client.mcpClientId));
+    history.replaceState(
+      null,
+      "",
+      `${location.pathname}${query.size ? `?${query}` : ""}`,
+    );
   }
   onMount(() => {
     void action(async () => {
@@ -208,6 +221,7 @@
       clientId =
         clients.find((client) => String(client.mcpClientId) === mcpClient)
           ?.id ?? "";
+      if (params.get("tab") === "admin" && admin) tab = "admin";
       const layoutId = params.get("layout");
       if (layoutId) await openLayout(layoutId);
     }, "");
@@ -215,26 +229,23 @@
 </script>
 
 <svelte:head><title>ICT365 | Rackula Workspace</title></svelte:head>
-<header class="no-print">
-  <a class="brand" href="/workspace.html"
-    ><span class="brand-mark">ICT<span>365</span></span><span
-      >Rackula Workspace</span
-    ></a
-  >
-  <nav aria-label="Workspace">
-    <button class:active={tab === "racks"} onclick={() => (tab = "racks")}
-      >Clients and racks</button
-    >
-    {#if admin}<button
-        class:active={tab === "admin"}
-        onclick={() => (tab = "admin")}>Administration</button
-      >{/if}
-    <a href="/">Rack designer</a><button
-      disabled={busy}
-      onclick={() => action(logout, "")}>Sign out</button
-    >
-  </nav>
-</header>
+<OfficeHeader
+  {catalog}
+  {clientId}
+  layoutId={detail?.id ?? ""}
+  workspace
+  {busy}
+  onclientchange={selectClient}
+  onlayoutchange={(id) => {
+    siteId = "";
+    tab = "racks";
+    void action(() => openLayout(id), "");
+  }}
+  onadmin={() => (tab = "admin")}
+/>
+{#if tab === "admin"}<div class="workspace-navigation no-print">
+    <button onclick={() => (tab = "racks")}>← Back to racks</button>
+  </div>{/if}
 <main>
   {#if error}<p role="alert" class="error no-print">{error}</p>{/if}
   {#if message}<p role="status" class="message no-print">{message}</p>{/if}
@@ -365,7 +376,7 @@
             event.preventDefault();
             void action(async () => {
               await api("/sites", "POST", {
-                clientId,
+                clientId: newSiteClient,
                 name: newSiteName,
                 address: newSiteAddress,
               });
@@ -376,7 +387,7 @@
           }}
         >
           <label
-            >Client<select required bind:value={clientId}
+            >Client<select required bind:value={newSiteClient}
               ><option value="">Select a client</option
               >{#each clients as client (client.id)}<option value={client.id}
                   >{client.name}</option
@@ -400,8 +411,13 @@
     <div class="page-title no-print">
       <div>
         <p class="eyebrow">Infrastructure documentation</p>
-        <h1>Clients, sites, and racks</h1>
-        <p>{catalog.user.name} · {catalog.user.role}</p>
+        <h1>
+          {clients.find((client) => client.id === clientId)?.name ??
+            (clientId === "unassigned"
+              ? "Unassigned layouts"
+              : "Your rack workspace")}
+        </h1>
+        <p>Select a client and rack layout in the header to get started.</p>
       </div>
       {#if admin}<button
           disabled={busy || !catalog.integrationEnabled}
@@ -413,19 +429,6 @@
         >{/if}
     </div>
     <section class="filters no-print">
-      <label
-        >Client<select
-          bind:value={clientId}
-          onchange={() => {
-            siteId = "";
-            detail = null;
-          }}
-          ><option value="">All permitted clients</option
-          >{#each clients as client (client.id)}<option value={client.id}
-              >{client.name}</option
-            >{/each}</select
-        ></label
-      >
       <label
         >Site<select bind:value={siteId} onchange={() => (detail = null)}
           ><option value="">All sites</option
@@ -442,7 +445,7 @@
         /></label
       >
     </section>
-    {#if editor && clientId && siteId}<form
+    {#if editor && clientId && clientId !== "unassigned" && siteId}<form
         class="inline-form no-print"
         onsubmit={(event) => {
           event.preventDefault();
@@ -711,8 +714,8 @@
         {:else}<div class="empty">
             <h2>Your infrastructure, organized</h2>
             <p>
-              Select a layout to view its racks, equipment records, MCPFlow
-              links, and client report.
+              Select a client and rack layout above to view racks, equipment
+              records, MCPFlow links, and client report.
             </p>
           </div>{/if}
       </article>
@@ -811,42 +814,8 @@
   :global(p) {
     color: #b7c3d5;
   }
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 20px;
-    padding: 18px 28px;
-    background: #182234;
-    border-bottom: 1px solid #334155;
-    flex-wrap: wrap;
-  }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    color: #e5e7eb;
-    text-decoration: none;
-  }
-  .brand-mark {
-    font-size: 26px;
-    font-weight: 800;
-    letter-spacing: -1px;
-  }
-  .brand-mark span {
-    color: #f87171;
-  }
-  nav {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-  nav a {
-    padding: 9px;
-  }
-  nav .active {
-    border-color: #f87171;
+  .workspace-navigation {
+    padding: 16px 28px 0;
   }
   main {
     max-width: 1600px;
@@ -875,7 +844,7 @@
   }
   .filters {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: 20px;
     margin: 20px 0;
   }
@@ -1030,9 +999,6 @@
     .page-title {
       align-items: start;
       flex-direction: column;
-    }
-    header {
-      padding: 15px;
     }
     .equipment summary {
       flex-direction: column;

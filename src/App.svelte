@@ -5,6 +5,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AnimationDefs from "$lib/components/AnimationDefs.svelte";
+  import OfficeHeader from "./lib/components/OfficeHeader.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import Canvas from "$lib/components/Canvas.svelte";
   import CanvasViewControls from "$lib/components/canvas/CanvasViewControls.svelte";
@@ -332,6 +333,9 @@
       void probeServerForBrowserHint();
     }
 
+    if (new URLSearchParams(location.search).get("settings") === "1") {
+      dialogStore.open("settings");
+    }
     const officeLayoutId = new URLSearchParams(location.search).get("layout");
     if (
       serverMode &&
@@ -745,6 +749,7 @@
 <!-- Tooltip.Provider enables shared tooltip state - only one tooltip shows at a time -->
 <Tooltip.Provider delayDuration={500}>
   <div class="app-layout">
+    <OfficeHeader />
     <Toolbar {partyMode} onlayoutexport={handleLayoutExport} />
 
     <RackIndicator />

@@ -115,16 +115,10 @@
        held constant across panel collapse so the tab strip never moves (#2583). -->
   {#if !viewportStore.isMobile}
     <div class="toolbar-section toolbar-right">
-      <a href="/workspace.html" aria-label="ICT365 clients and administration"
-        >Workspace</a
-      >
       <StorageStatusChip />
     </div>
   {:else}
     <div class="toolbar-section toolbar-right toolbar-right-mobile">
-      <a href="/workspace.html" aria-label="ICT365 clients and administration"
-        >Workspace</a
-      >
       <StorageStatusChip />
     </div>
   {/if}
