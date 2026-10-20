@@ -48,7 +48,7 @@ jobs:
             file: deploy/Dockerfile
             name_suffix: ""
           - image: api
-            context: ./api
+            context: .
             file: ./api/Dockerfile
             name_suffix: "-api"
     runs-on: ${{ matrix.runner }}

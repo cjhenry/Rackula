@@ -29,6 +29,20 @@
     users: User[];
     mcpflowUrl: string;
     integrationEnabled: boolean;
+    synchronization?: {
+      enabled: boolean;
+      sourceInstance: string;
+      scanError: string | null;
+    };
+  };
+  type DeliveryStatus = {
+    layoutId: string;
+    status: string;
+    revision: number;
+    acknowledgedRevision: number;
+    lastConfirmedAt?: string;
+    error?: string;
+    receiverRevision?: number;
   };
   type Detail = {
     id: string;
@@ -37,6 +51,7 @@
     client: Client | null;
     site: Site | null;
     updatedAt: string;
+    synchronization?: Omit<DeliveryStatus, "layoutId"> | null;
   };
   let catalog = $state<Catalog | null>(null);
   let detail = $state<Detail | null>(null);
@@ -46,6 +61,7 @@
   let tab = $state("racks");
   let error = $state("");
   let message = $state("");
+  let deliveries = $state<DeliveryStatus[]>([]);
   let busy = $state(false);
   let assignmentClient = $state("");
   let assignmentSite = $state("");
@@ -75,7 +91,7 @@
     (catalog?.layouts ?? []).filter(
       (row) =>
         (clientId === "unassigned"
-          ? !row.assignment
+          ? !row.assignment?.clientId
           : !!clientId && row.assignment?.clientId === clientId) &&
         (!siteId || row.assignment?.siteId === siteId) &&
         row.name.toLowerCase().includes(search.toLowerCase()),
@@ -116,7 +132,7 @@
     message = "";
     try {
       await run();
-      message = success;
+      if (success) message = success;
     } catch (err) {
       error = err instanceof Error ? err.message : "Request failed";
     } finally {
@@ -125,10 +141,19 @@
   }
   async function reload() {
     catalog = await api<Catalog>();
+    if (catalog.synchronization) await refreshDelivery();
+  }
+  async function refreshDelivery() {
+    const result = await api<{ layouts: DeliveryStatus[] }>("/sync-status");
+    deliveries = result.layouts;
+    if (detail)
+      detail.synchronization =
+        deliveries.find((row) => row.layoutId === detail?.id) ??
+        detail.synchronization;
   }
   async function openLayout(id: string) {
     detail = await api<Detail>(`/layouts/${encodeURIComponent(id)}`);
-    clientId = detail.assignment?.clientId ?? "unassigned";
+    clientId = detail.assignment?.clientId || "unassigned";
     assignmentClient = detail.assignment?.clientId ?? "";
     assignmentSite = detail.assignment?.siteId ?? "";
     const query = new SvelteURLSearchParams(location.search);
@@ -225,6 +250,11 @@
       const layoutId = params.get("layout");
       if (layoutId) await openLayout(layoutId);
     }, "");
+    const timer = setInterval(() => {
+      if (catalog?.synchronization && !busy)
+        void refreshDelivery().catch(() => undefined);
+    }, 10000);
+    return () => clearInterval(timer);
   });
 </script>
 
@@ -249,6 +279,87 @@
 <main>
   {#if error}<p role="alert" class="error no-print">{error}</p>{/if}
   {#if message}<p role="status" class="message no-print">{message}</p>{/if}
+  {#if catalog?.synchronization && admin}
+    <details class="no-print">
+      <summary
+        >MCPFlow synchronization: {catalog.synchronization.enabled
+          ? "automatic delivery enabled"
+          : "automatic delivery disabled"}</summary
+      >
+      <p>
+        Saved layouts synchronize separately from published Documents. Last
+        confirmed delivery and any rejected asset links are shown below.
+      </p>
+      {#if catalog.synchronization.scanError}<p role="alert">
+          {catalog.synchronization.scanError}
+        </p>{/if}
+      <button
+        disabled={busy || !catalog.integrationEnabled}
+        onclick={() =>
+          action(async () => {
+            const result = await api<{
+              queued: number;
+              skipped: number;
+              errors: number;
+            }>("/sync-backfill", "POST", {});
+            await refreshDelivery();
+            message = `Backfill: ${result.queued} queued, ${result.skipped} unassigned, ${result.errors} needing attention.`;
+          }, "")}>Backfill linked saved layouts</button
+      >
+      {#each deliveries as delivery (delivery.layoutId)}
+        <div class="equipment">
+          <strong
+            >{catalog.layouts.find((row) => row.id === delivery.layoutId)
+              ?.name ?? delivery.layoutId}</strong
+          >
+          <p>
+            {delivery.status.replaceAll("_", " ")} · revision {delivery.revision}
+            · accepted {delivery.acknowledgedRevision}
+          </p>
+          {#if delivery.lastConfirmedAt}<p>
+              Last confirmed: {new Date(
+                delivery.lastConfirmedAt,
+              ).toLocaleString()}
+            </p>{/if}
+          {#if delivery.error}<p role="alert">{delivery.error}</p>{/if}
+          {#if delivery.status === "reconcile_required"}
+            <button
+              disabled={busy}
+              onclick={() => {
+                const floor = delivery.receiverRevision ?? delivery.revision;
+                if (
+                  window.confirm(
+                    `Review the saved layout, client assignment and asset links first. Publish that current state above receiver revision ${floor}?`,
+                  )
+                )
+                  void action(async () => {
+                    await api(
+                      `/layouts/${delivery.layoutId}/sync-reconcile`,
+                      "POST",
+                      { receiverRevision: floor, confirmCurrentSource: true },
+                    );
+                    await refreshDelivery();
+                  }, "Current saved state queued above the reviewed revision floor.");
+              }}>Review and reconcile revision</button
+            >
+          {:else if delivery.status !== "unassigned"}
+            <button
+              disabled={busy}
+              onclick={() =>
+                action(async () => {
+                  await api(
+                    `/layouts/${delivery.layoutId}/sync-retry`,
+                    "POST",
+                    {},
+                  );
+                  await refreshDelivery();
+                }, "Delivery queued for retry.")}>Retry delivery</button
+            >
+          {/if}
+        </div>
+      {/each}
+    </details>
+  {/if}
   {#if !catalog}<p>Loading workspace...</p>
   {:else if tab === "admin" && admin}
     <section class="no-print">
@@ -534,6 +645,36 @@
                 detail.assignment.lastPushedAt,
               ).toLocaleString()}
             </p>{/if}
+          {#if detail.synchronization}<div class="no-print">
+              <p>
+                Snapshot delivery: {detail.synchronization.status.replaceAll(
+                  "_",
+                  " ",
+                )} · revision {detail.synchronization.revision} · accepted {detail
+                  .synchronization.acknowledgedRevision}
+              </p>
+              {#if detail.synchronization.lastConfirmedAt}<p>
+                  Last confirmed: {new Date(
+                    detail.synchronization.lastConfirmedAt,
+                  ).toLocaleString()}
+                </p>{/if}
+              {#if detail.synchronization.error}<p role="alert">
+                  {detail.synchronization.error}
+                </p>{/if}
+              {#if editor && detail.synchronization.status !== "reconcile_required"}<button
+                  disabled={busy}
+                  onclick={() =>
+                    action(async () => {
+                      await api(
+                        `/layouts/${detail!.id}/sync-retry`,
+                        "POST",
+                        {},
+                      );
+                      await openLayout(detail!.id);
+                    }, "Snapshot delivery queued for retry.")}
+                  >Retry snapshot delivery</button
+                >{/if}
+            </div>{/if}
           {#if admin}<form
               class="assignment no-print"
               onsubmit={(event) => {
@@ -566,6 +707,17 @@
                     >{/each}</select
                 ></label
               ><button disabled={busy}>Save assignment</button>
+              {#if detail.assignment?.clientId}<button
+                  type="button"
+                  disabled={busy}
+                  onclick={() =>
+                    action(async () => {
+                      await api(`/layouts/${detail!.id}/assignment`, "DELETE");
+                      await reload();
+                      await openLayout(detail!.id);
+                    }, "Layout unassigned. A removal is queued for MCPFlow; equipment annotations are retained.")}
+                  >Unassign layout</button
+                >{/if}
             </form>{/if}
           {#if preview}<div class="rack-preview">
               <!-- eslint-disable-next-line svelte/no-at-html-tags -- Export renderer builds SVG using DOM APIs and escapes user text. -->
@@ -690,13 +842,13 @@
                       >Notes<textarea
                         name="notes"
                         readonly={!editor}
-                        maxlength="5000">{record.notes}</textarea
+                        maxlength="4000">{record.notes}</textarea
                       ></label
                     >
                     <div class="actions no-print">
                       {#if editor}<button disabled={busy || !detail.assignment}
                           >Save equipment</button
-                        >{/if}{#if record.mcpAssetId && detail.client?.mcpClientId}<a
+                        >{/if}{#if record.mcpAssetId && detail.client?.mcpClientId && detail.synchronization?.status === "synced"}<a
                           href={`${catalog.mcpflowUrl}/agent/asset_details.php?client_id=${detail.client.mcpClientId}&asset_id=${record.mcpAssetId}`}
                           target="_blank"
                           rel="noreferrer">Open MCPFlow asset</a

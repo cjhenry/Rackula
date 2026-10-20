@@ -62,6 +62,149 @@ describe("ICT365 client isolation", () => {
 });
 
 describe("ICT365 API authorization", () => {
+  test("queues real create/save/equipment/move/unassign/delete routes without publishing Documents", async () => {
+    const { createApp } = await import("./app");
+    const { createSignedAuthSessionToken } = await import("./security");
+    const { createFilesystemDriver } =
+      await import("./storage/filesystem-driver");
+    const { readFile } = await import("node:fs/promises");
+    const path = await mkdtemp(join(tmpdir(), "rackula-office-routes-"));
+    directories.push(path);
+    const previous = process.env.DATA_DIR;
+    process.env.DATA_DIR = path;
+    try {
+      const secret = "office-route-secret-at-least-32-characters";
+      const app = await createApp(
+        {
+          NODE_ENV: "test",
+          DATA_DIR: path,
+          RACKULA_OFFICE_ENABLED: "true",
+          RACKULA_AUTH_MODE: "local",
+          RACKULA_LOCAL_USERNAME: "admin",
+          RACKULA_LOCAL_PASSWORD: "route-password-long-enough",
+          RACKULA_AUTH_SESSION_SECRET: secret,
+          CORS_ORIGIN: "https://rack.example.com",
+          RACKULA_TRUST_PROXY: "true",
+        },
+        { storage: createFilesystemDriver() },
+      );
+      const store = new OfficeStore(path);
+      await store.update((state) => {
+        state.clients = [
+          { id: "a", name: "A", mcpClientId: 1 },
+          { id: "b", name: "B", mcpClientId: 2 },
+        ];
+        state.sites = [
+          { id: "sa", clientId: "a", name: "A site" },
+          { id: "sb", clientId: "b", name: "B site" },
+        ];
+      });
+      const user = (await store.read()).users[0]!;
+      const headers = {
+        Cookie: `rackula_auth_session=${createSignedAuthSessionToken({ sub: `office:${user.id}:1`, role: "admin" }, secret)}`,
+        Origin: "https://rack.example.com",
+        "Content-Type": "application/json",
+        "x-real-ip": "10.0.0.12",
+      };
+      const created = await app.request("/api/office/layouts", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          name: "Route test",
+          clientId: "a",
+          siteId: "sa",
+        }),
+      });
+      expect(created.status).toBe(201);
+      const { id } = await created.json();
+      const content = await readFile(
+        new URL(
+          "../../src/tests/fixtures/upgrade-corpus/v0.6.0-single-rack.rackula.yaml",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const saved = await app.request(`/api/layouts/${id}`, {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/yaml" },
+        body: `${content}\nmetadata:\n  id: ${id}\n  name: Route test\n  schema_version: '1.1'\n`,
+      });
+      expect(saved.status).toBe(200);
+      const equipment = {
+        serial: "EXPLICIT",
+        assetTag: "",
+        hostname: "",
+        managementIp: "",
+        installed: "",
+        warrantyExpires: "",
+        notes: "Retained annotation",
+      };
+      expect(
+        (
+          await app.request(`/api/office/layouts/${id}/equipment/dev-switch`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify(equipment),
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await app.request(`/api/office/layouts/${id}/assignment`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({ clientId: "b", siteId: "sb" }),
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await app.request(`/api/office/layouts/${id}/assignment`, {
+            method: "DELETE",
+            headers,
+          })
+        ).status,
+      ).toBe(200);
+      const unassigned = await app.request(`/api/office/layouts/${id}`, {
+        headers,
+      });
+      expect((await unassigned.json()).synchronization).toMatchObject({
+        revision: 5,
+        status: "pending",
+      });
+      expect(
+        (await store.read()).layouts[id]?.equipment["dev-switch"]?.notes,
+      ).toBe("Retained annotation");
+      expect(
+        (
+          await app.request(`/api/office/layouts/${id}/assignment`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({ clientId: "a", siteId: "sa" }),
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (await app.request(`/api/layouts/${id}`, { method: "DELETE", headers }))
+          .status,
+      ).toBe(200);
+      const journal = JSON.parse(
+        await readFile(
+          join(path, "office", "mcpflow-sync", `${id}.json`),
+          "utf8",
+        ),
+      );
+      expect(journal).toMatchObject({
+        revision: 7,
+        payload: { operation: "delete" },
+      });
+      expect((await store.read()).layouts[id]).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.DATA_DIR;
+      else process.env.DATA_DIR = previous;
+    }
+  });
+
   test("enforces client boundaries on both route aliases, images, snapshots, and reports", async () => {
     const { createApp } = await import("./app");
     const { createSignedAuthSessionToken } = await import("./security");
@@ -190,6 +333,37 @@ describe("ICT365 API authorization", () => {
     expect(data.clients.map((item: { id: string }) => item.id)).toEqual(["a"]);
     expect(data.users).toEqual([]);
     expect(JSON.stringify(data)).not.toContain("passwordHash");
+    for (const route of [
+      "/api/office/sync-backfill",
+      `/api/office/layouts/${layoutB}/sync-retry`,
+      `/api/office/layouts/${layoutA}/sync-reconcile`,
+    ]) {
+      expect(
+        (
+          await app.request(route, {
+            method: "POST",
+            headers: editor,
+            body: "{}",
+          })
+        ).status,
+      ).toBe(403);
+    }
+    expect(
+      (
+        await app.request(`/api/office/layouts/${layoutA}/sync-retry`, {
+          method: "POST",
+          headers: headers("office:viewer:1"),
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+    const deliveryStatus = await app.request("/api/office/sync-status", {
+      headers: editor,
+    });
+    expect(deliveryStatus.status).toBe(200);
+    expect(JSON.stringify(await deliveryStatus.json())).not.toContain(
+      "passwordHash",
+    );
     await store.update((state) => {
       state.users.find((user) => user.id === "editor")!.disabled = true;
     });

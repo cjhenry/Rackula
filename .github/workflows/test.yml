@@ -119,6 +119,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install shared layout model build dependencies
+        run: npm ci --ignore-scripts
+
       - name: Install API dependencies
         working-directory: api
         run: bun install --frozen-lockfile

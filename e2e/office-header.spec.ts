@@ -21,6 +21,91 @@ const layouts = clients.map((client) => ({
   updatedAt: "2026-10-19T00:00:00Z",
 }));
 
+test("shows delivery errors and retries or backfills snapshots without publishing reports", async ({
+  page,
+}) => {
+  let deliveryStatus = "error";
+  const mutations: string[] = [];
+  await page.route("**/api/office", (route) =>
+    route.fulfill({
+      json: {
+        user: {
+          id: "user",
+          username: "alex",
+          name: "Alex Smith",
+          role: "admin",
+          clientIds: [],
+          disabled: false,
+        },
+        clients,
+        sites,
+        layouts,
+        users: [],
+        mcpflowUrl: "",
+        integrationEnabled: true,
+        synchronization: {
+          enabled: true,
+          sourceInstance: "ict365-rackula",
+          scanError: null,
+        },
+      },
+    }),
+  );
+  await page.route("**/api/office/sync-status", (route) =>
+    route.fulfill({
+      json: {
+        enabled: true,
+        layouts: [
+          {
+            layoutId: "rack-a",
+            status: deliveryStatus,
+            revision: 2,
+            acknowledgedRevision: 1,
+            error:
+              deliveryStatus === "error"
+                ? "Linked asset belongs to another client"
+                : undefined,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/office/layouts/rack-a/sync-retry", (route) => {
+    mutations.push(route.request().url());
+    deliveryStatus = "pending";
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/office/sync-backfill", (route) => {
+    mutations.push(route.request().url());
+    return route.fulfill({ json: { queued: 1, skipped: 1, errors: 0 } });
+  });
+  page.on("request", (request) => {
+    if (request.url().endsWith("/push")) mutations.push(request.url());
+  });
+  await page.goto("/workspace.html");
+  await page
+    .getByText("MCPFlow synchronization: automatic delivery enabled")
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Linked asset belongs to another client",
+  );
+  await page
+    .getByRole("button", { name: "Retry delivery", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "Delivery queued for retry",
+  );
+  await page
+    .getByRole("button", { name: "Backfill linked saved layouts" })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "1 queued, 1 unassigned, 0 needing attention",
+  );
+  expect(mutations.some((url) => url.endsWith("/sync-retry"))).toBe(true);
+  expect(mutations.some((url) => url.endsWith("/sync-backfill"))).toBe(true);
+  expect(mutations.some((url) => url.endsWith("/push"))).toBe(false);
+});
+
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/office", (route) =>
     route.fulfill({

@@ -1,7 +1,7 @@
 import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -13,6 +13,8 @@ import {
   verifyPasswordHash,
   type LocalCredentials,
 } from "./local-auth";
+import { durableJson } from "./durable-file";
+import { McpflowPublisher, McpflowInputError } from "./mcpflow-publisher";
 
 const roleSchema = z.enum(["admin", "editor", "viewer"]);
 const idSchema = z
@@ -34,13 +36,13 @@ const siteSchema = z.object({
   mcpLocationId: z.number().int().positive().optional(),
 });
 const equipmentSchema = z.object({
-  serial: text(),
-  assetTag: text(),
-  hostname: text(),
-  managementIp: text(),
+  serial: text(200),
+  assetTag: text(200),
+  hostname: text(253),
+  managementIp: text(100),
   installed: z.union([z.literal(""), z.iso.date()]),
   warrantyExpires: z.union([z.literal(""), z.iso.date()]),
-  notes: text(5000),
+  notes: text(4000),
   mcpAssetId: z.number().int().positive().optional(),
 });
 const userInputSchema = z.object({
@@ -158,11 +160,7 @@ export class OfficeStore {
         await readFile(this.filename, "utf8"),
       ) as OfficeState;
       const result = await mutate(state);
-      const temporary = `${this.filename}.${randomUUID()}.tmp`;
-      await writeFile(temporary, JSON.stringify(state, null, 2), {
-        mode: 0o600,
-      });
-      await rename(temporary, this.filename);
+      await durableJson(this.filename, state);
       return result;
     });
     this.tail = operation.catch(() => undefined);
@@ -230,6 +228,61 @@ export async function createOffice(
 ) {
   const store = new OfficeStore(env.DATA_DIR ?? "./data");
   await store.initialize(credentials);
+  const publisher = new McpflowPublisher({
+    directory: env.DATA_DIR ?? "./data",
+    office: store,
+    storage,
+    env,
+  });
+  await publisher.initialize();
+  const synchronizedStorage = (user: OfficeUser) =>
+    new Proxy(storage, {
+      get(target, key) {
+        if (key === "saveLayout")
+          return async (
+            content: string,
+            existingId?: string,
+            echoedUpdatedAt?: string,
+            options?: { preCarrierMigration?: boolean },
+          ) => {
+            const id = existingId ?? randomUUID();
+            const isNew = !(await target.layoutExists(id));
+            await publisher.change(id, async () => {
+              requireClient(
+                user,
+                (await store.read()).layouts[id]?.clientId,
+                true,
+              );
+              return {
+                content,
+                echoedUpdatedAt,
+                preCarrierMigration: options?.preCarrierMigration,
+              };
+            });
+            return {
+              id,
+              isNew,
+              updatedAt: (await target.getLayout(id))!.updatedAt,
+            };
+          };
+        if (key === "deleteLayout")
+          return async (id: string) => {
+            const exists = await target.layoutExists(id);
+            if (exists)
+              await publisher.change(id, async () => {
+                requireClient(
+                  user,
+                  (await store.read()).layouts[id]?.clientId,
+                  true,
+                );
+                return { content: null, assignment: null };
+              });
+            return exists;
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
   const middleware: MiddlewareHandler<OfficeEnv> = async (c, next) => {
     const claims = c.get("authClaims");
     const user = claims ? await store.resolveUser(claims.sub) : undefined;
@@ -251,7 +304,7 @@ export async function createOffice(
       else if (write) requireAdmin(user);
       c.set(
         "storage",
-        new Proxy(storage, {
+        new Proxy(synchronizedStorage(user), {
           get(target, key) {
             if (key === "listLayouts")
               return async () =>
@@ -295,7 +348,54 @@ export async function createOffice(
       mcpflowUrl: env.MCPFLOW_PUBLIC_URL ?? "https://mcpflow.ict365.ky",
       integrationEnabled:
         !!env.MCPFLOW_INTEGRATION_TOKEN && !!env.MCPFLOW_INTEGRATION_URL,
+      synchronization: {
+        enabled: env.MCPFLOW_SYNC_ENABLED === "true",
+        sourceInstance: env.MCPFLOW_SOURCE_INSTANCE ?? "ict365-rackula",
+        scanError: publisher.scanError ?? null,
+      },
     });
+  });
+  routes.get("/sync-status", async (c) => {
+    const user = c.get("officeUser");
+    const state = await store.read();
+    const rows = (await publisher.states()).filter((row) =>
+      canAccessClient(user, state.layouts[row.layoutId]?.clientId),
+    );
+    return c.json({
+      enabled: env.MCPFLOW_SYNC_ENABLED === "true",
+      scanError: publisher.scanError ?? null,
+      layouts: rows.map(
+        ({ payload: _payload, captureHash: _hash, ...status }) => {
+          void _payload;
+          void _hash;
+          return status;
+        },
+      ),
+    });
+  });
+  routes.post("/sync-backfill", async (c) => {
+    requireAdmin(c.get("officeUser"));
+    return c.json(await publisher.reconcile());
+  });
+  routes.post("/layouts/:id/sync-retry", async (c) => {
+    const id = valid(z.uuid(), c.req.param("id"));
+    const state = await store.read();
+    requireClient(c.get("officeUser"), state.layouts[id]?.clientId, true);
+    await publisher.retry(id);
+    return c.json({ ok: true });
+  });
+  routes.post("/layouts/:id/sync-reconcile", async (c) => {
+    requireAdmin(c.get("officeUser"));
+    const id = valid(z.uuid(), c.req.param("id"));
+    const input = valid(
+      z.object({
+        receiverRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        confirmCurrentSource: z.literal(true),
+      }),
+      await c.req.json(),
+    );
+    await publisher.reconcileFloor(id, input.receiverRevision);
+    return c.json({ ok: true });
   });
   routes.post("/clients", async (c) => {
     requireAdmin(c.get("officeUser"));
@@ -386,24 +486,23 @@ export async function createOffice(
     );
     requireClient(c.get("officeUser"), input.clientId, true);
     const id = randomUUID();
-    await store.update((state) => {
-      if (
-        !state.sites.some(
-          (site) =>
-            site.id === input.siteId && site.clientId === input.clientId,
-        )
+    const state = await store.read();
+    if (
+      !state.sites.some(
+        (site) => site.id === input.siteId && site.clientId === input.clientId,
       )
-        throw new HTTPException(400, {
-          message: "Site must belong to selected client",
-        });
-      state.layouts[id] = {
-        clientId: input.clientId,
-        siteId: input.siteId,
-        equipment: {},
-      };
-    });
-    await storage.saveLayout(
-      yaml.dump({
+    )
+      throw new HTTPException(400, {
+        message: "Site must belong to selected client",
+      });
+    const assignment = {
+      clientId: input.clientId,
+      siteId: input.siteId,
+      equipment: {},
+    };
+    await publisher.mutate(id, {
+      assignment,
+      content: yaml.dump({
         version: "26.10.1",
         name: input.name,
         metadata: { id, name: input.name, schema_version: "1.1" },
@@ -411,8 +510,7 @@ export async function createOffice(
         device_types: [],
         settings: { display_mode: "label", show_labels_on_images: false },
       }),
-      id,
-    );
+    });
     return c.json({ id }, 201);
   });
   routes.put("/layouts/:id/assignment", async (c) => {
@@ -424,7 +522,8 @@ export async function createOffice(
     );
     if (!(await storage.layoutExists(id)))
       throw new HTTPException(404, { message: "Layout not found" });
-    await store.update((state) => {
+    await publisher.change(id, async () => {
+      const state = await store.read();
       if (
         !state.sites.some(
           (item) =>
@@ -435,8 +534,20 @@ export async function createOffice(
           message: "Site must belong to selected client",
         });
       const old = state.layouts[id];
-      state.layouts[id] = { ...input, equipment: old?.equipment ?? {} };
+      return { assignment: { ...input, equipment: old?.equipment ?? {} } };
     });
+    return c.json({ ok: true });
+  });
+  routes.delete("/layouts/:id/assignment", async (c) => {
+    requireAdmin(c.get("officeUser"));
+    const id = valid(z.uuid(), c.req.param("id"));
+    if (!(await storage.layoutExists(id)))
+      throw new HTTPException(404, { message: "Layout not found" });
+    await publisher.mutateAssignment(id, (current) => ({
+      clientId: "",
+      siteId: "",
+      equipment: current?.equipment ?? {},
+    }));
     return c.json({ ok: true });
   });
   async function layoutData(id: string, user: OfficeUser) {
@@ -451,6 +562,18 @@ export async function createOffice(
       layout: parseLayout(layout.content),
       updatedAt: layout.updatedAt,
       assignment: assignment ?? null,
+      synchronization: await publisher.status(id).then((value) =>
+        value
+          ? {
+              status: value.status,
+              revision: value.revision,
+              acknowledgedRevision: value.acknowledgedRevision,
+              lastConfirmedAt: value.lastConfirmedAt,
+              error: value.error,
+              receiverRevision: value.receiverRevision,
+            }
+          : null,
+      ),
       client:
         state.clients.find((item) => item.id === assignment?.clientId) ?? null,
       site: state.sites.find((item) => item.id === assignment?.siteId) ?? null,
@@ -461,23 +584,34 @@ export async function createOffice(
   );
   routes.put("/layouts/:id/equipment/:deviceId", async (c) => {
     const id = c.req.param("id");
-    const deviceId = valid(idSchema, c.req.param("deviceId"));
+    const deviceId = valid(
+      z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/),
+      c.req.param("deviceId"),
+    );
     const data = await layoutData(id, c.get("officeUser"));
     requireClient(c.get("officeUser"), data.assignment?.clientId, true);
-    const racks = data.layout.racks as { devices: { id: string }[] }[];
+    const racks = (data.layout.racks ?? [data.layout.rack]) as {
+      devices: { id: string }[];
+    }[];
     if (
       !racks.some((rack) => rack.devices.some((item) => item.id === deviceId))
     )
       throw new HTTPException(404, { message: "Device not found in layout" });
     const input = valid(equipmentSchema, await c.req.json());
-    await store.update((state) => {
-      const assignment = state.layouts[id];
+    await publisher.mutateAssignment(id, (assignment) => {
       if (!assignment)
         throw new HTTPException(400, {
           message: "Assign this layout to a client and site first",
         });
       requireClient(c.get("officeUser"), assignment.clientId, true);
-      assignment.equipment[deviceId] = input;
+      return {
+        ...assignment,
+        equipment: { ...assignment.equipment, [deviceId]: input },
+      };
     });
     return c.json({ ok: true });
   });
@@ -525,6 +659,7 @@ export async function createOffice(
         else state.sites.push(site);
       }
     });
+    await publisher.reconcile();
     return c.json({ ok: true, clients: clients.length, sites: sites.length });
   });
   routes.post("/layouts/:id/push", async (c) => {
@@ -549,6 +684,8 @@ export async function createOffice(
     return c.json({ ok: true, documentId: result.documentId });
   });
   routes.onError((error, c) => {
+    if (error instanceof McpflowInputError)
+      return c.json({ error: error.message }, 422);
     if (error instanceof HTTPException)
       return c.json({ error: error.message }, error.status);
     if (error instanceof SyntaxError)
@@ -556,5 +693,6 @@ export async function createOffice(
     console.error("ICT365 request failed", error);
     return c.json({ error: "Unable to complete request" }, 500);
   });
-  return { store, middleware, routes };
+  await publisher.start();
+  return { store, middleware, routes, publisher };
 }
