@@ -43,8 +43,8 @@ bun run dev
 ### Production
 
 ```bash
-# Build for production
-bun run build
+# From api/: build the shared layout migration bundle with root dependencies installed.
+node ../scripts/build-mcpflow-normalizer.mjs
 
 # Start production server
 bun run start
@@ -53,14 +53,54 @@ bun run start
 ### Docker
 
 ```bash
-# Build Docker image
-docker build -t rackula-api .
+# Build from the repository root, including the shared layout migration model.
+cd ..
+docker build -f api/Dockerfile -t rackula-api .
 
 # Run container
-docker run -p 3000:3000 \
+docker run -p 3001:3001 \
   -e RACKULA_AUTH_SESSION_SECRET=your-secret \
   rackula-api
 ```
+
+## ICT365 MCPFlow snapshot publisher
+
+The office workspace can publish read-only snapshots using MCPFlow's v2 `sync_layout` contract. Manual `/office/layouts/:id/push` still publishes a Document only when requested. Automatic synchronization never invokes it.
+
+| Server variable | Purpose |
+| --- | --- |
+| `MCPFLOW_INTEGRATION_URL` | Existing authenticated receiver URL. Internal HTTP is supported on the Docker network. |
+| `MCPFLOW_INTEGRATION_TOKEN` | Existing server-only bearer token. Never expose it to browsers. |
+| `MCPFLOW_SOURCE_INSTANCE` | Stable source identity; defaults to `ict365-rackula`. Must match MCPFlow configuration. |
+| `MCPFLOW_SYNC_ENABLED` | Set exactly `true` to run the worker. Defaults to disabled; saves still queue durably. |
+
+Use one API process per data directory, matching the filesystem driver's locking model. Every saved layout, assignment, equipment edit and removal uses the same per-layout lock. Before source changes, the API writes and flushes a recoverable journal. It then commits source files, the registry and pending delivery state before retiring the journal. Startup and delivery ticks replay unfinished journals. Keep the data directory on a filesystem supporting atomic rename and fsync.
+
+The normalized export uses the frontend's full schema migrations, carrier adapter, orientation and effective-face utilities. Source placement IDs stay intact. Generated migration carriers receive deterministic IDs. Rail positions are converted through the placement utilities; container children retain explicit parent/slot references. Removed-device annotations remain in office data but are excluded from active snapshots.
+
+The worker checks pending jobs every five seconds. It confirms unchanged active layouts and reconciles saved content every 15 minutes. Failed scans never imply deletion. Explicit deletion/unassignment journals retain higher-revision tombstones before source data is discarded. Unassignment retains equipment annotations.
+
+The workspace shows delivery state, revisions, last confirmation and actionable errors. Administrators can backfill linked layouts, retry deliveries and explicitly reconcile restored counters. Editors can retry layouts they may edit. These session-authenticated endpoints are available with and without `/api`:
+
+- `GET /office/sync-status`: authorized layout delivery metadata; no tokens or full snapshot payloads.
+- `POST /office/sync-backfill`: enqueue all MCPFlow-linked saved layouts; report queued, skipped and error counts.
+- `POST /office/layouts/:id/sync-retry`: retry the same coherent pending revision.
+- `POST /office/layouts/:id/sync-reconcile`: after reviewing source and receiver state, send `{"receiverRevision":42,"confirmCurrentSource":true}` to publish current saved state above that revision floor.
+- `DELETE /office/layouts/:id/assignment`: unassign and queue removal without deleting the layout or equipment annotations.
+
+Timeouts are 15 seconds, redirects are rejected, and responses are bounded to 64 KiB. Network errors, 429 and 5xx retry with bounded exponential backoff and jitter, honoring `Retry-After`. Validation/authentication failures stop automatic retries. Equal-revision conflicts or superseded source counters require operator reconciliation; old responses cannot acknowledge a newer pending edit. The 1 MiB request cap is checked before delivery; oversized layouts are never truncated.
+
+Only explicit `mcpAssetId` annotations become asset links. MCPFlow validates ownership against the assigned client before acknowledging a snapshot. Rejected links appear as delivery errors; no acceptance is claimed. Clear explicit asset links before moving a layout to another client. Names and serials never infer links. Workspace asset links appear only after MCPFlow accepts the current snapshot.
+
+Back up `DATA_DIR` in full, including layouts, images, `office/registry.json`, `office/mcpflow-sync/`, `office/mcpflow-journal/` and any unfinished journals. Preserve the registry's users and password hashes, runtime configuration and source identity. After restoring older revision state, review the receiver's reported revision floor before explicitly reconciling. Stop the API writer for a consistent backup. Disabling the worker stops automatic delivery while preserving queued events and source data. Do not restore old source data as part of an image rollback.
+
+API tests require the root build dependencies and API dependencies. Run `npm ci --ignore-scripts` at the root, then `bun install --frozen-lockfile` and `bun run test` in `api/`. For receiver conformance, set `MCPFLOW_CONTRACT_HELPER` to MCPFlow's `includes/rackula_sync.php` when running the normalizer tests; PHP must be available. This reads the receiver contract without loading application configuration or modifying MCPFlow.
+
+## Rendered MCPFlow rack diagrams
+
+The preview sender is implemented separately from structured snapshots and remains disabled until MCPFlow adds its receiver. See [the finalized upload contract and MCPFlow implementation prompt](../docs/deployment/MCPFLOW_PREVIEWS.md) for multipart requests/responses, ordering, private serving, receiver tests and deployment requirements.
+
+Build `api/Dockerfile.previews` for the preview-capable API, then configure `MCPFLOW_PREVIEWS_ENABLED=true` only after the receiver is ready. It reuses the integration URL/token/source. The office workspace displays per-face rendering/delivery errors and offers initial backfill and retries. Back up `office/mcpflow-previews/` with the complete data directory. Manual reports and the 1 MiB structured snapshot API are unchanged.
 
 ## Deployment behind a reverse proxy
 

@@ -102,3 +102,7 @@ docs/planning/
 # Codex
 .codex/
 .agents/
+
+# Server bundle of the shared layout migration and placement model.
+api/src/mcpflow-normalizer.js
+api/src/mcpflow-preview-browser.js

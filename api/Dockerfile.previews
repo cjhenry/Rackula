@@ -1,0 +1,33 @@
+# Build from repository root. Debian supplies Chromium's supported system libraries.
+# The ordinary Alpine API image can keep previews disabled without installing a browser.
+FROM node:22-bookworm AS renderer-build
+WORKDIR /workspace
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY scripts/build-mcpflow-normalizer.mjs scripts/build-mcpflow-preview.mjs ./scripts/
+COPY src/lib/ ./src/lib/
+COPY api/src/ ./api/src/
+RUN node scripts/build-mcpflow-normalizer.mjs && node scripts/build-mcpflow-preview.mjs
+
+FROM oven/bun:1.3.10-debian
+WORKDIR /app
+COPY api/package.json api/bun.lock ./
+RUN bun install --frozen-lockfile --production --omit=peer
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/rackula-browsers
+RUN bun node_modules/playwright-core/cli.js install --with-deps chromium && \
+    chmod -R a+rX /opt/rackula-browsers && \
+    groupadd --gid 1001 rackula && useradd --uid 1001 --gid 1001 --create-home rackula && \
+    mkdir -p /data && chown rackula:rackula /data
+COPY api/src/ ./src/
+COPY --from=renderer-build /workspace/api/src/mcpflow-normalizer.js ./src/mcpflow-normalizer.js
+COPY --from=renderer-build /workspace/api/src/mcpflow-preview-browser.js ./src/mcpflow-preview-browser.js
+ARG APP_VERSION=""
+ARG APP_COMMIT=""
+ARG APP_BUILD_TIME=""
+ENV NODE_ENV=production DATA_DIR=/data PORT=3001 APP_VERSION=${APP_VERSION} APP_COMMIT=${APP_COMMIT} APP_BUILD_TIME=${APP_BUILD_TIME}
+LABEL org.opencontainers.image.source="https://github.com/cjhenry/Rackula" org.opencontainers.image.description="Rackula API with isolated MCPFlow preview renderer"
+USER rackula
+EXPOSE 3001
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD bun -e 'fetch("http://127.0.0.1:"+(process.env.RACKULA_API_PORT||3001)+"/health").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))'
+CMD ["bun", "src/index.ts"]

@@ -1,3 +1,15 @@
+# Build from the repository root: docker build -f api/Dockerfile .
+# The publisher uses the same migrations and placement model as the frontend.
+FROM node:22-alpine AS layout-model
+WORKDIR /workspace
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY tsconfig.json ./
+COPY scripts/build-mcpflow-normalizer.mjs ./scripts/build-mcpflow-normalizer.mjs
+COPY src/lib/ ./src/lib/
+COPY api/src/mcpflow-layout-runtime.ts api/src/mcpflow-contract.ts api/src/yaml-safety.ts ./api/src/
+RUN node scripts/build-mcpflow-normalizer.mjs
+
 # Rackula API Sidecar
 # Tiny Bun-based API for layout persistence
 FROM oven/bun:1.3.10-alpine AS base
@@ -5,7 +17,7 @@ FROM oven/bun:1.3.10-alpine AS base
 # Install dependencies
 FROM base AS deps
 WORKDIR /app
-COPY package.json bun.lock* ./
+COPY api/package.json api/bun.lock* ./
 # better-auth declares vitest as an optional peer, and Bun installs optional
 # peers present in the lockfile, so --production alone ships the dev-only
 # vitest/vite tree. --omit=peer drops it (#3205).
@@ -33,8 +45,9 @@ RUN addgroup --system --gid 1001 rackula && \
 
 # Copy dependencies, manifest, and source
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json ./
-COPY src/ ./src/
+COPY api/package.json ./
+COPY api/src/ ./src/
+COPY --from=layout-model /workspace/api/src/mcpflow-normalizer.js ./src/mcpflow-normalizer.js
 
 # Create data directory
 RUN mkdir -p /data && chown rackula:rackula /data

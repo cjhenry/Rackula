@@ -5,6 +5,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AnimationDefs from "$lib/components/AnimationDefs.svelte";
+  import OfficeHeader from "./lib/components/OfficeHeader.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import Canvas from "$lib/components/Canvas.svelte";
   import CanvasViewControls from "$lib/components/canvas/CanvasViewControls.svelte";
@@ -58,6 +59,7 @@
     clearBrowserWriteFailure,
     loadWorkspaceIndex,
     loadLayoutBody,
+    loadFromApi,
   } from "$lib/storage";
   import { serializeLayoutToYaml } from "$lib/utils/yaml";
   import { maybeExport, handleFitAll } from "$lib/utils/app-actions";
@@ -329,6 +331,20 @@
       : Promise.resolve(false);
     if (!serverMode) {
       void probeServerForBrowserHint();
+    }
+
+    if (new URLSearchParams(location.search).get("settings") === "1") {
+      dialogStore.open("settings");
+    }
+    const officeLayoutId = new URLSearchParams(location.search).get("layout");
+    if (
+      serverMode &&
+      officeLayoutId &&
+      /^[0-9a-f-]{36}$/i.test(officeLayoutId)
+    ) {
+      await persistenceInitPromise;
+      await loadFromApi(officeLayoutId);
+      return;
     }
 
     // Priority 1: Check for shared layout in URL (highest priority)
@@ -733,6 +749,7 @@
 <!-- Tooltip.Provider enables shared tooltip state - only one tooltip shows at a time -->
 <Tooltip.Provider delayDuration={500}>
   <div class="app-layout">
+    <OfficeHeader />
     <Toolbar {partyMode} onlayoutexport={handleLayoutExport} />
 
     <RackIndicator />
