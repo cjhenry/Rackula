@@ -96,6 +96,12 @@ Back up `DATA_DIR` in full, including layouts, images, `office/registry.json`, `
 
 API tests require the root build dependencies and API dependencies. Run `npm ci --ignore-scripts` at the root, then `bun install --frozen-lockfile` and `bun run test` in `api/`. For receiver conformance, set `MCPFLOW_CONTRACT_HELPER` to MCPFlow's `includes/rackula_sync.php` when running the normalizer tests; PHP must be available. This reads the receiver contract without loading application configuration or modifying MCPFlow.
 
+## Rendered MCPFlow rack diagrams
+
+The preview sender is implemented separately from structured snapshots and remains disabled until MCPFlow adds its receiver. See [the finalized upload contract and MCPFlow implementation prompt](../docs/deployment/MCPFLOW_PREVIEWS.md) for multipart requests/responses, ordering, private serving, receiver tests and deployment requirements.
+
+Build `api/Dockerfile.previews` for the preview-capable API, then configure `MCPFLOW_PREVIEWS_ENABLED=true` only after the receiver is ready. It reuses the integration URL/token/source. The office workspace displays per-face rendering/delivery errors and offers initial backfill and retries. Back up `office/mcpflow-previews/` with the complete data directory. Manual reports and the 1 MiB structured snapshot API are unchanged.
+
 ## Deployment behind a reverse proxy
 
 Run the API behind a trusted reverse proxy (for example nginx) that overwrites the client-IP header with the real socket address. Rackula's nginx template sets `X-Real-IP` to `$remote_addr`. Trusting that header for client-identity resolution (rate limiting) is opt-in: set `RACKULA_TRUST_PROXY=true` when you deploy behind such a proxy. The bundled nginx deployment sets it for you.

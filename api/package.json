@@ -13,7 +13,8 @@
     "test": "node ../scripts/build-mcpflow-normalizer.mjs && bun test",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "build:worker": "node ../scripts/build-mcpflow-normalizer.mjs && wrangler deploy --dry-run --outdir dist-worker",
-    "typecheck": "node ../scripts/build-mcpflow-normalizer.mjs && tsc --noEmit"
+    "typecheck": "node ../scripts/build-mcpflow-normalizer.mjs && tsc --noEmit",
+    "test:previews": "node ../scripts/build-mcpflow-normalizer.mjs && node ../scripts/build-mcpflow-preview.mjs && RACKULA_PREVIEW_RENDER_TESTS=true bun test src/mcpflow-preview-render.test.ts src/mcpflow-previews.test.ts"
   },
   "overrides": {
     "defu": "^6.1.5",
@@ -26,6 +27,8 @@
     "jose": "^6.2.12",
     "js-yaml": "^4.3.2",
     "pino": "^10.4.0",
+    "playwright-core": "1.64.0",
+    "sharp": "0.35.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {

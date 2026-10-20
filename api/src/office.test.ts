@@ -335,6 +335,8 @@ describe("ICT365 API authorization", () => {
     expect(JSON.stringify(data)).not.toContain("passwordHash");
     for (const route of [
       "/api/office/sync-backfill",
+      "/api/office/preview-backfill",
+      `/api/office/layouts/${layoutB}/preview-retry`,
       `/api/office/layouts/${layoutB}/sync-retry`,
       `/api/office/layouts/${layoutA}/sync-reconcile`,
     ]) {
@@ -357,6 +359,23 @@ describe("ICT365 API authorization", () => {
         })
       ).status,
     ).toBe(403);
+    expect(
+      (
+        await app.request(`/api/office/layouts/${layoutA}/preview-retry`, {
+          method: "POST",
+          headers: headers("office:viewer:1"),
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+    const previews = await app.request("/api/office/preview-status", {
+      headers: editor,
+    });
+    expect(previews.status).toBe(200);
+    expect(await previews.json()).toMatchObject({
+      enabled: false,
+      layouts: [],
+    });
     const deliveryStatus = await app.request("/api/office/sync-status", {
       headers: editor,
     });

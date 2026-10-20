@@ -12,10 +12,7 @@ import type { SyncSnapshot } from "./mcpflow-contract";
 
 const stableId = (value: string) =>
   `sync-${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
-export function normalizeLayout(
-  content: string,
-  layoutId: string,
-): SyncSnapshot {
+export function migrateLayout(content: string, layoutId: string): Layout {
   const raw = yaml.load(content, { schema: yaml.JSON_SCHEMA });
   assertYamlComplexityBounded(raw, Buffer.byteLength(content));
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
@@ -68,6 +65,14 @@ export function normalizeLayout(
   // Newly created office layouts legitimately have no racks yet. The base schema
   // still validates their fields; placement integrity applies once racks exist.
   const layout = adapted.racks.length ? LayoutSchema.parse(adapted) : adapted;
+  return layout as Layout;
+}
+
+export function normalizeLayout(
+  content: string,
+  layoutId: string,
+): SyncSnapshot {
+  const layout = migrateLayout(content, layoutId);
   const types = new Map(layout.device_types.map((type) => [type.slug, type]));
   const equipment: SyncSnapshot["equipment"] = {};
   for (const rack of layout.racks) {
@@ -140,7 +145,7 @@ export function normalizeLayout(
     })),
     equipment,
     source: {
-      version: body.version,
+      version: layout.version,
       racks: layout.racks.map((rack) => ({
         id: rack.id,
         devices: rack.devices.map((device) => ({

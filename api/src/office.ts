@@ -14,6 +14,8 @@ import {
   type LocalCredentials,
 } from "./local-auth";
 import { durableJson } from "./durable-file";
+import { McpflowPreviews } from "./mcpflow-previews";
+import { validateAssetBytes } from "./storage/asset-validation";
 import { McpflowPublisher, McpflowInputError } from "./mcpflow-publisher";
 
 const roleSchema = z.enum(["admin", "editor", "viewer"]);
@@ -235,6 +237,11 @@ export async function createOffice(
     env,
   });
   await publisher.initialize();
+  const previews = new McpflowPreviews({
+    directory: env.DATA_DIR ?? "./data",
+    publisher,
+    env,
+  });
   const synchronizedStorage = (user: OfficeUser) =>
     new Proxy(storage, {
       get(target, key) {
@@ -264,6 +271,56 @@ export async function createOffice(
               isNew,
               updatedAt: (await target.getLayout(id))!.updatedAt,
             };
+          };
+        if (key === "saveAsset")
+          return async (
+            id: string,
+            deviceSlug: string,
+            face: "front" | "rear",
+            data: ArrayBuffer,
+            contentType: string,
+          ) => {
+            validateAssetBytes(data, contentType);
+            await publisher.change(id, async () => {
+              requireClient(
+                user,
+                (await store.read()).layouts[id]?.clientId,
+                true,
+              );
+              return {
+                asset: {
+                  deviceSlug,
+                  face,
+                  data: Buffer.from(data).toString("base64"),
+                  contentType,
+                },
+              };
+            });
+          };
+        if (key === "deleteAsset")
+          return async (
+            id: string,
+            deviceSlug: string,
+            face: "front" | "rear",
+          ) => {
+            const exists = !!(await target.getAsset(id, deviceSlug, face));
+            if (exists)
+              await publisher.change(id, async () => {
+                requireClient(
+                  user,
+                  (await store.read()).layouts[id]?.clientId,
+                  true,
+                );
+                return {
+                  asset: {
+                    deviceSlug,
+                    face,
+                    data: null,
+                    contentType: "image/png",
+                  },
+                };
+              });
+            return exists;
           };
         if (key === "deleteLayout")
           return async (id: string) => {
@@ -351,6 +408,7 @@ export async function createOffice(
       synchronization: {
         enabled: env.MCPFLOW_SYNC_ENABLED === "true",
         sourceInstance: env.MCPFLOW_SOURCE_INSTANCE ?? "ict365-rackula",
+        previewsEnabled: env.MCPFLOW_PREVIEWS_ENABLED === "true",
         scanError: publisher.scanError ?? null,
       },
     });
@@ -372,6 +430,41 @@ export async function createOffice(
         },
       ),
     });
+  });
+  routes.get("/preview-status", async (c) => {
+    const user = c.get("officeUser");
+    const state = await store.read();
+    return c.json({
+      enabled: env.MCPFLOW_PREVIEWS_ENABLED === "true",
+      error: user.role === "admin" ? (previews.error ?? null) : null,
+      layouts: (await previews.statuses()).filter(
+        (row) =>
+          (user.role === "admin" || row.current) &&
+          canAccessClient(user, state.layouts[row.layoutId]?.clientId),
+      ),
+    });
+  });
+  routes.post("/preview-backfill", async (c) => {
+    requireAdmin(c.get("officeUser"));
+    const input = valid(
+      z.object({ advanceRevision: z.boolean().optional() }),
+      await c.req.json(),
+    );
+    if (input.advanceRevision) {
+      for (const state of await publisher.states())
+        if (state.payload?.operation === "upsert")
+          await publisher.change(state.layoutId, async () => ({
+            previewRefresh: true,
+          }));
+    }
+    return c.json(await previews.backfill());
+  });
+  routes.post("/layouts/:id/preview-retry", async (c) => {
+    const id = valid(z.uuid(), c.req.param("id"));
+    const state = await store.read();
+    requireClient(c.get("officeUser"), state.layouts[id]?.clientId, true);
+    await previews.retry(id);
+    return c.json({ ok: true });
   });
   routes.post("/sync-backfill", async (c) => {
     requireAdmin(c.get("officeUser"));
@@ -694,5 +787,6 @@ export async function createOffice(
     return c.json({ error: "Unable to complete request" }, 500);
   });
   await publisher.start();
-  return { store, middleware, routes, publisher };
+  previews.start();
+  return { store, middleware, routes, publisher, previews };
 }

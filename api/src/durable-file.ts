@@ -12,10 +12,17 @@ export async function syncDirectory(path: string): Promise<void> {
 }
 
 export async function durableJson(path: string, value: unknown): Promise<void> {
+  return durableBytes(path, JSON.stringify(value));
+}
+
+export async function durableBytes(
+  path: string,
+  value: string | Uint8Array,
+): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(JSON.stringify(value));
+    await handle.writeFile(value);
     await handle.sync();
   } finally {
     await handle.close();

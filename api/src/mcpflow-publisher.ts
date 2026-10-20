@@ -13,6 +13,13 @@ export type SourcePatch = {
   assignment?: Assignment | null;
   echoedUpdatedAt?: string;
   preCarrierMigration?: boolean;
+  previewRefresh?: boolean;
+  asset?: {
+    deviceSlug: string;
+    face: "front" | "rear";
+    data: string | null;
+    contentType: string;
+  };
 };
 export interface DeliveryState {
   version: 1;
@@ -160,6 +167,21 @@ export class McpflowPublisher {
     await this.commitJournal(journal);
   }
   private async applySource(id: string, patch: SourcePatch): Promise<void> {
+    if (patch.asset) {
+      const a = patch.asset;
+      if (a.data === null)
+        await this.options.storage.deleteAsset(id, a.deviceSlug, a.face);
+      else {
+        const bytes = Uint8Array.from(Buffer.from(a.data, "base64"));
+        await this.options.storage.saveAsset(
+          id,
+          a.deviceSlug,
+          a.face,
+          bytes.buffer,
+          a.contentType,
+        );
+      }
+    }
     if (patch.content === null) await this.options.storage.deleteLayout(id);
     else if (patch.content !== undefined) {
       const current = await this.options.storage.getLayout(id);
@@ -203,6 +225,20 @@ export class McpflowPublisher {
         } finally {
           await handle.close();
         }
+      }
+      if (patch.asset) {
+        const assetFolder = join(path, "assets", patch.asset.deviceSlug);
+        for (const file of await readdir(assetFolder)) {
+          if (!/^(front|rear)\.(png|jpg|webp)$/.test(file)) continue;
+          const handle = await open(join(assetFolder, file), "r");
+          try {
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+        }
+        await syncDirectory(assetFolder);
+        await syncDirectory(join(path, "assets"));
       }
       await syncDirectory(path);
     }
@@ -284,6 +320,8 @@ export class McpflowPublisher {
           locationId: payload.locationId,
           siteName: payload.siteName,
           snapshot: businessSnapshot,
+          // Visual-only edits (images, colours, widths) must also get a new revision.
+          savedLayoutHash: hash(content),
         });
       } else if (
         forceRemoval ||
@@ -393,7 +431,9 @@ export class McpflowPublisher {
       assignment,
       office,
       await this.load(id),
-      undefined,
+      patch.asset || patch.previewRefresh
+        ? ((await this.load(id))?.revision ?? 0)
+        : undefined,
       removing,
     );
     const journal: Journal = { version: 1, layoutId: id, patch, state };
@@ -652,6 +692,77 @@ export class McpflowPublisher {
           : null;
       }
       await this.persist(state);
+    });
+  }
+
+  /** Freeze source and custom image bytes under the same lock as source mutations. */
+  async previewCapture(
+    id: string,
+  ): Promise<import("./mcpflow-preview-types").PreviewInput | null> {
+    id = this.key(id);
+    return this.lock(id, async () => {
+      await this.recoverPending(id);
+      const state = await this.load(id);
+      if (
+        !state ||
+        state.payload?.operation !== "upsert" ||
+        state.status !== "synced" ||
+        state.acknowledgedRevision !== state.revision ||
+        !state.acknowledgedHash
+      )
+        return null;
+      const source = await this.options.storage.getLayout(id);
+      if (!source) return null;
+      const office = await this.options.office.read();
+      const coherent = this.build(
+        id,
+        source.content,
+        office.layouts[id],
+        office,
+        state,
+      );
+      if (coherent !== state) {
+        await this.persist(coherent);
+        return null;
+      }
+      const assets: import("./mcpflow-preview-types").PreviewInput["assets"] =
+        [];
+      let size = 0;
+      const listed = this.options.storage.listLayoutAssets
+        ? await this.options.storage.listLayoutAssets(id)
+        : [];
+      if (listed.length > 1000)
+        throw new Error(
+          "Preview asset count exceeds 1,000; reduce uploaded images",
+        );
+      for (const asset of listed) {
+        const image = await this.options.storage.getAsset(
+          id,
+          asset.deviceSlug,
+          asset.face,
+        );
+        if (!image) continue;
+        size += image.data.byteLength;
+        if (size > 16 * 1024 * 1024)
+          throw new Error(
+            "Preview source images exceed 16 MiB; optimize uploaded images",
+          );
+        assets.push({
+          key: asset.deviceSlug,
+          face: asset.face,
+          mimeType: image.contentType,
+          data: Buffer.from(image.data).toString("base64"),
+        });
+      }
+      return {
+        layoutId: id,
+        revision: state.revision,
+        snapshotHash: state.acknowledgedHash,
+        sourceInstance: state.payload.sourceInstance,
+        content: source.content,
+        rackIds: state.payload.snapshot!.racks.map((r) => r.id),
+        assets,
+      };
     });
   }
   async start(): Promise<void> {

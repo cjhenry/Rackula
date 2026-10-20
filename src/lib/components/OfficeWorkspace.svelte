@@ -32,6 +32,7 @@
     synchronization?: {
       enabled: boolean;
       sourceInstance: string;
+      previewsEnabled?: boolean;
       scanError: string | null;
     };
   };
@@ -44,6 +45,20 @@
     error?: string;
     receiverRevision?: number;
   };
+  type PreviewStatus = {
+    layoutId: string;
+    revision: number;
+    current: boolean;
+    jobs: {
+      rackId: string;
+      face: string;
+      status: string;
+      error?: string;
+      warnings?: string[];
+    }[];
+  };
+  let previewDeliveries = $state<PreviewStatus[]>([]);
+  let previewDeliveryError = $state("");
   type Detail = {
     id: string;
     layout: Layout;
@@ -146,6 +161,19 @@
   async function refreshDelivery() {
     const result = await api<{ layouts: DeliveryStatus[] }>("/sync-status");
     deliveries = result.layouts;
+    if (catalog?.synchronization?.previewsEnabled !== undefined) {
+      try {
+        const previews = await api<{
+          layouts: PreviewStatus[];
+          error: string | null;
+        }>("/preview-status");
+        previewDeliveries = previews.layouts;
+        previewDeliveryError = previews.error ?? "";
+      } catch {
+        previewDeliveryError =
+          "Could not load diagram delivery status. Check the preview API and retry.";
+      }
+    }
     if (detail)
       detail.synchronization =
         deliveries.find((row) => row.layoutId === detail?.id) ??
@@ -279,6 +307,53 @@
 <main>
   {#if error}<p role="alert" class="error no-print">{error}</p>{/if}
   {#if message}<p role="status" class="message no-print">{message}</p>{/if}
+  {#if catalog?.synchronization?.previewsEnabled !== undefined && admin}
+    <section class="no-print panel" aria-label="Rack diagram delivery">
+      <h2>
+        Rack diagrams: {catalog.synchronization.previewsEnabled
+          ? "enabled"
+          : "disabled"}
+      </h2>
+      <p>
+        Rendered pictures are delivered separately after MCPFlow accepts the
+        equipment snapshot.
+      </p>
+      {#if previewDeliveryError}<p role="alert">{previewDeliveryError}</p>{/if}
+      <button
+        disabled={busy}
+        onclick={() =>
+          action(async () => {
+            await api("/preview-backfill", "POST", {});
+            await refreshDelivery();
+          }, "Diagram backfill queued")}>Backfill diagrams</button
+      >
+      {#each previewDeliveries as row (row.layoutId)}
+        <details>
+          <summary
+            >{catalog.layouts.find((l) => l.id === row.layoutId)?.name ??
+              row.layoutId}: revision {row.revision}{row.current
+              ? ""
+              : " (outdated)"}</summary
+          >
+          {#each row.jobs as job (job.rackId + job.face)}
+            <p>{job.rackId} / {job.face}: {job.status.replaceAll("_", " ")}</p>
+            {#if job.error}<p role="alert">{job.error}</p>{/if}
+            {#each job.warnings ?? [] as warning, index (index)}<p>
+                {warning}
+              </p>{/each}
+          {/each}
+          <button
+            disabled={busy}
+            onclick={() =>
+              action(async () => {
+                await api(`/layouts/${row.layoutId}/preview-retry`, "POST", {});
+                await refreshDelivery();
+              }, "Diagram retry queued")}>Retry diagrams</button
+          >
+        </details>
+      {/each}
+    </section>
+  {/if}
   {#if catalog?.synchronization && admin}
     <details class="no-print">
       <summary

@@ -134,6 +134,14 @@ jobs:
         working-directory: api
         run: bun test
 
+      - name: Install headless preview Chromium
+        working-directory: api
+        run: bun node_modules/playwright-core/cli.js install --with-deps chromium
+
+      - name: Test server-rendered rack previews
+        working-directory: api
+        run: bun run test:previews
+
       # Slice 2 (#2625): the same storage contract against the R2 driver inside
       # workerd via Miniflare, plus the R2-specific prune/quota/asset specs.
       - name: Run R2 storage contract (workers pool)

@@ -90,6 +90,97 @@ async function setup(deliver?: typeof fetch) {
 }
 
 describe("durable MCPFlow publisher", () => {
+  test("visual-only saved layout edits advance revisions without altering normalized equipment", async () => {
+    const ctx = await setup();
+    await ctx.publisher.reconcile();
+    await ctx.publisher.deliver();
+    const before = await ctx.publisher.status(id);
+    await ctx.publisher.mutate(id, {
+      content: ctx.content + "\n# saved drawing change\n",
+    });
+    const after = await ctx.publisher.status(id);
+    expect(after?.revision).toBe(2);
+    expect(after?.payload?.snapshot).toEqual(before?.payload?.snapshot);
+    await ctx.publisher.reconcile();
+    expect((await ctx.publisher.status(id))?.revision).toBe(2);
+  });
+  test("image-only changes advance snapshot revisions and recover image writes from a journal", async () => {
+    const ctx = await setup();
+    await ctx.publisher.reconcile();
+    await ctx.publisher.deliver();
+    let fail = true;
+    let saved = "";
+    ctx.storage.saveAsset = async (_id, _key, _face, bytes) => {
+      saved = Buffer.from(bytes).toString("base64");
+      if (fail) throw new Error("interrupted image write");
+    };
+    const patch = {
+      asset: {
+        deviceSlug: "dev-switch",
+        face: "front" as const,
+        data: Buffer.from("frozen bytes").toString("base64"),
+        contentType: "image/png",
+      },
+    };
+    await expect(ctx.publisher.mutate(id, patch)).rejects.toThrow(
+      "interrupted image write",
+    );
+    expect((await ctx.publisher.status(id))?.revision).toBe(1);
+    fail = false;
+    const restarted = new McpflowPublisher({
+      directory: ctx.directory,
+      office: ctx.office,
+      storage: ctx.storage,
+      env: {},
+      fetch: ctx.transport,
+    });
+    await restarted.initialize();
+    expect(saved).toBe(patch.asset.data);
+    expect((await restarted.status(id))?.revision).toBe(2);
+    await restarted.reconcile();
+    expect((await restarted.status(id))?.revision).toBe(2);
+  });
+  test("freezes acknowledged source/image bytes and refuses out-of-band changed source", async () => {
+    const ctx = await setup();
+    await ctx.publisher.reconcile();
+    expect(await ctx.publisher.previewCapture(id)).toBeNull();
+    await ctx.publisher.deliver();
+    ctx.storage.listLayoutAssets = async () => [
+      {
+        layoutId: id,
+        deviceSlug: "dev-switch",
+        face: "front",
+        ext: "png",
+        size: 3,
+      },
+    ];
+    ctx.storage.getAsset = async () => ({
+      data: Uint8Array.from([1, 2, 3]),
+      contentType: "image/png",
+    });
+    const capture = await ctx.publisher.previewCapture(id);
+    expect(capture).toMatchObject({
+      revision: 1,
+      content: ctx.content,
+      assets: [
+        {
+          key: "dev-switch",
+          data: "AQID",
+          face: "front",
+          mimeType: "image/png",
+        },
+      ],
+    });
+    ctx.data.set(id, {
+      content: ctx.content.replace(
+        "Old Single-Rack Lab",
+        "Changed outside API",
+      ),
+      updatedAt: "2026-10-20T12:01:00Z",
+    });
+    expect(await ctx.publisher.previewCapture(id)).toBeNull();
+    expect((await ctx.publisher.status(id))?.revision).toBe(2);
+  });
   test("persists and sends deletion tombstones even before an initial backfill", async () => {
     const ctx = await setup();
     await ctx.publisher.mutate(id, { content: null, assignment: null });
