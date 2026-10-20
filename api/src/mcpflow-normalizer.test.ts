@@ -10,6 +10,20 @@ const corpus = new URL(
 );
 
 describe("MCPFlow normalized layout export", () => {
+  test("exports a newly created empty layout without inventing racks", () => {
+    const snapshot = normalizeLayout(
+      JSON.stringify({
+        name: "New layout",
+        settings: { display_mode: "label", show_labels_on_images: false },
+        racks: [],
+        device_types: [],
+      }),
+      id,
+    );
+    expect(snapshot.racks).toEqual([]);
+    expect(snapshot.deviceTypes).toEqual([]);
+    expect(snapshot.equipment).toEqual({});
+  });
   test("migrates legacy rail positions and uses effective front/rear occupancy", async () => {
     const yaml = await readFile(
       new URL("v0.6.0-single-rack.rackula.yaml", corpus),

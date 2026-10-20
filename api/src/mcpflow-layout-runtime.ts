@@ -65,7 +65,9 @@ export function normalizeLayout(
           remap.get(device.container_id) ?? device.container_id;
     }
   }
-  const layout = LayoutSchema.parse(adapted);
+  // Newly created office layouts legitimately have no racks yet. The base schema
+  // still validates their fields; placement integrity applies once racks exist.
+  const layout = adapted.racks.length ? LayoutSchema.parse(adapted) : adapted;
   const types = new Map(layout.device_types.map((type) => [type.slug, type]));
   const equipment: SyncSnapshot["equipment"] = {};
   for (const rack of layout.racks) {
