@@ -92,6 +92,32 @@ describe("Office header", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("offers explicitly unassigned layouts with retained annotations outside the former client", async () => {
+    const data = {
+      ...catalog,
+      layouts: [
+        ...catalog.layouts,
+        {
+          id: "detached",
+          name: "Detached layout",
+          assignment: { clientId: "", siteId: "", equipment: {} },
+        },
+      ],
+    };
+    const { rerender } = render(OfficeHeader, {
+      catalog: data,
+      workspace: true,
+      clientId: "unassigned",
+    });
+    expect(
+      screen.getByRole("option", { name: "Detached layout" }),
+    ).toBeInTheDocument();
+    await rerender({ catalog: data, workspace: true, clientId: "a" });
+    expect(
+      screen.queryByRole("option", { name: "Detached layout" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows account details and hides administration for viewers", async () => {
     const showModal = vi
       .spyOn(HTMLDialogElement.prototype, "showModal")

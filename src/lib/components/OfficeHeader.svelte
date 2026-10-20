@@ -42,7 +42,7 @@
   const layouts = $derived(
     catalog?.layouts.filter((row) =>
       currentClient === "unassigned"
-        ? !row.assignment
+        ? !row.assignment?.clientId
         : !!currentClient && row.assignment?.clientId === currentClient,
     ) ?? [],
   );
@@ -71,7 +71,7 @@
         selectedLayout =
           new URLSearchParams(location.search).get("layout") ?? "";
         const row = result.layouts.find((item) => item.id === selectedLayout);
-        selectedClient = row?.assignment?.clientId ?? (row ? "unassigned" : "");
+        selectedClient = row?.assignment?.clientId || (row ? "unassigned" : "");
       } catch (err) {
         if (!cancelled)
           error =

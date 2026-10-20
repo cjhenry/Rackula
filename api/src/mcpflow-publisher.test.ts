@@ -90,6 +90,37 @@ async function setup(deliver?: typeof fetch) {
 }
 
 describe("durable MCPFlow publisher", () => {
+  test("persists and sends deletion tombstones even before an initial backfill", async () => {
+    const ctx = await setup();
+    await ctx.publisher.mutate(id, { content: null, assignment: null });
+    await ctx.publisher.deliver();
+    expect(ctx.sent[0]).toMatchObject({ operation: "delete", revision: 1 });
+    expect(ctx.data.has(id)).toBe(false);
+  });
+  test("reconciliation finishes an interrupted source transaction before capturing content or ownership", async () => {
+    const ctx = await setup();
+    await ctx.publisher.reconcile();
+    const save = ctx.storage.saveLayout.bind(ctx.storage);
+    ctx.storage.saveLayout = async (...args) => {
+      await save(...args);
+      throw new Error("interrupted after layout write");
+    };
+    await expect(
+      ctx.publisher.mutate(id, {
+        content: ctx.content.replace(
+          "Old Single-Rack Lab",
+          "Coherent recovery",
+        ),
+        assignment: { clientId: "mcp-2", siteId: "main-2", equipment: {} },
+      }),
+    ).rejects.toThrow("interrupted after layout write");
+    ctx.storage.saveLayout = save;
+    await ctx.publisher.reconcile();
+    expect((await ctx.publisher.status(id))?.payload).toMatchObject({
+      clientId: 2,
+      snapshot: { name: "Coherent recovery" },
+    });
+  });
   test("backfills, confirms unchanged content, and keeps reports separate", async () => {
     const ctx = await setup();
     await ctx.publisher.reconcile();

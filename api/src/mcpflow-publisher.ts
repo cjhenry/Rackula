@@ -137,21 +137,27 @@ export class McpflowPublisher {
     for (const name of await readdir(this.journals)) {
       if (!name.endsWith(".json")) continue;
       const id = this.key(name.slice(0, -5));
-      await this.lock(id, async () => {
-        const journal = JSON.parse(
-          await readFile(join(this.journals, name), "utf8"),
-        ) as Journal;
-        if (
-          journal.version !== 1 ||
-          journal.layoutId !== id ||
-          journal.state.layoutId !== id
-        )
-          throw new Error(
-            "Invalid synchronization journal; operator recovery required",
-          );
-        await this.commitJournal(journal);
-      });
+      await this.lock(id, () => this.recoverPending(id));
     }
+  }
+  private async recoverPending(id: string): Promise<void> {
+    let content: string;
+    try {
+      content = await readFile(join(this.journals, `${id}.json`), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const journal = JSON.parse(content) as Journal;
+    if (
+      journal.version !== 1 ||
+      journal.layoutId !== id ||
+      journal.state.layoutId !== id
+    )
+      throw new Error(
+        "Invalid synchronization journal; operator recovery required",
+      );
+    await this.commitJournal(journal);
   }
   private async applySource(id: string, patch: SourcePatch): Promise<void> {
     if (patch.content === null) await this.options.storage.deleteLayout(id);
@@ -215,6 +221,7 @@ export class McpflowPublisher {
     office: OfficeState,
     previous: DeliveryState | null,
     forceFloor?: number,
+    forceRemoval = false,
   ): DeliveryState {
     const client = office.clients.find(
       (item) => item.id === assignment?.clientId,
@@ -278,7 +285,11 @@ export class McpflowPublisher {
           siteName: payload.siteName,
           snapshot: businessSnapshot,
         });
-      } else if (previous?.payload || previous?.acknowledgedRevision) {
+      } else if (
+        forceRemoval ||
+        previous?.payload ||
+        previous?.acknowledgedRevision
+      ) {
         payload = {
           action: "sync_layout",
           schemaVersion: 2,
@@ -343,13 +354,7 @@ export class McpflowPublisher {
   }
   private async mutateLocked(id: string, patch: SourcePatch): Promise<void> {
     const outstanding = join(this.journals, `${id}.json`);
-    try {
-      await this.commitJournal(
-        JSON.parse(await readFile(outstanding, "utf8")) as Journal,
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    await this.recoverPending(id);
     const office = await this.options.office.read();
     const previousAssignment = office.layouts[id];
     if (
@@ -371,12 +376,25 @@ export class McpflowPublisher {
     const assignment = Object.hasOwn(patch, "assignment")
       ? (patch.assignment ?? undefined)
       : previousAssignment;
+    const previousLinked = office.clients.some(
+      (client) =>
+        client.id === previousAssignment?.clientId && client.mcpClientId,
+    );
+    const nextLinked = office.clients.some(
+      (client) => client.id === assignment?.clientId && client.mcpClientId,
+    );
+    const removing =
+      patch.content === null ||
+      (Object.hasOwn(patch, "assignment") &&
+        (!assignment?.clientId || (previousLinked && !nextLinked)));
     const state = this.build(
       id,
       content,
       assignment,
       office,
       await this.load(id),
+      undefined,
+      removing,
     );
     const journal: Journal = { version: 1, layoutId: id, patch, state };
     await durableJson(outstanding, journal);
@@ -394,15 +412,7 @@ export class McpflowPublisher {
   async change(id: string, prepare: () => Promise<SourcePatch>): Promise<void> {
     id = this.key(id);
     await this.lock(id, async () => {
-      try {
-        await this.commitJournal(
-          JSON.parse(
-            await readFile(join(this.journals, `${id}.json`), "utf8"),
-          ) as Journal,
-        );
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+      await this.recoverPending(id);
       await this.mutateLocked(id, await prepare());
     });
   }
@@ -419,6 +429,7 @@ export class McpflowPublisher {
         continue;
       }
       await this.lock(this.key(layout.id), async () => {
+        await this.recoverPending(this.key(layout.id));
         const current = await this.options.storage.getLayout(layout.id);
         if (!current) {
           summary.errors++;
@@ -465,6 +476,7 @@ export class McpflowPublisher {
   async reconcileFloor(id: string, floor: number): Promise<void> {
     id = this.key(id);
     await this.lock(id, async () => {
+      await this.recoverPending(id);
       const previous = await this.load(id);
       if (
         !previous ||
